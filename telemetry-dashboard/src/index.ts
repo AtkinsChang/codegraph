@@ -12,6 +12,7 @@
  * D1 is read-only here. Writes belong to the ingest worker's cron.
  */
 
+import { handleApi } from './api';
 import {
   checkPassword,
   clearedSessionCookie,
@@ -200,34 +201,19 @@ async function handleLoginSubmit(env: Env, request: Request): Promise<Response> 
 }
 
 /**
- * Scaffold API. CG-12 hangs the real chart endpoints off `/api/*`; everything
- * added there is gated by the same session check as this handler.
+ * The chart endpoints live in src/api.ts and return data, not responses, so this
+ * file stays the single place that decides headers on an authenticated reply.
+ * Everything under `/api/` is behind the same session check as the pages.
  */
-async function handleApi(env: Env, url: URL): Promise<Response> {
-  if (url.pathname === '/api/session') {
-    return json({ authenticated: true });
-  }
-
-  if (url.pathname === '/api/health') {
-    try {
-      const batch = await env.DB.batch<{ day: string | null }>([
-        env.DB.prepare('SELECT max(day) AS day FROM events'),
-        env.DB.prepare('SELECT max(day) AS day FROM daily_machines'),
-      ]);
-      return json({
-        ok: true,
-        database: {
-          latest_event_day: batch[0]?.results[0]?.day ?? null,
-          latest_rollup_day: batch[1]?.results[0]?.day ?? null,
-        },
-      });
-    } catch (err) {
-      console.error(JSON.stringify({ msg: 'health query failed', err: String(err) }));
-      return json({ ok: false, error: 'database unavailable' }, { status: 503 });
-    }
-  }
-
-  return json({ error: 'not found' }, { status: 404 });
+async function apiResponse(env: Env, url: URL): Promise<Response> {
+  const result = await handleApi(env, url);
+  return json(result.body, {
+    status: result.status,
+    // Chart data is daily-granular, so a few minutes in the browser's private
+    // cache saves D1 a round of identical queries on every panel re-render.
+    // Anything without an explicit lifetime keeps the no-store default.
+    headers: result.cacheControl ? { 'cache-control': result.cacheControl } : undefined,
+  });
 }
 
 /** Gated static assets: the dashboard shell, its JS, its CSS, the chart library. */
@@ -274,7 +260,7 @@ export default {
         if (!isRead) {
           return json({ error: 'method not allowed' }, { status: 405, headers: { allow: 'GET' } });
         }
-        return await handleApi(env, url);
+        return await apiResponse(env, url);
       }
 
       if (!isRead) {

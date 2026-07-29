@@ -17,24 +17,34 @@
       </form>
     </header>
 
-    <main>
-      <!-- CG-13 replaces this section with the Chart.js views. Until then it is a
-           live proof that the session gate, the D1 binding and the asset
-           pipeline all work end to end. -->
-      <section class="panel">
-        <h2>Connection</h2>
-        <dl class="facts">
-          <dt>Database</dt>
-          <dd id="db-status">Checking…</dd>
-          <dt>Latest event</dt>
-          <dd id="latest-event">—</dd>
-          <dt>Latest rollup</dt>
-          <dd id="latest-rollup">—</dd>
-          <dt>Chart library</dt>
-          <dd id="chart-status">Checking…</dd>
-        </dl>
-      </section>
-    </main>
+    <!-- One filter row for the whole page: every panel below is drawn against the
+         range chosen here, and no panel carries a time control of its own. The
+         panels themselves are built from the registry in public/panels.js. -->
+    <section class="filters" id="filters" aria-label="Time range">
+      <div class="filter-group" data-role="presets"></div>
+
+      <div class="filter-group custom-range">
+        <label for="custom-from">From</label>
+        <input type="date" id="custom-from" data-role="custom-from" />
+        <label for="custom-to">To</label>
+        <input type="date" id="custom-to" data-role="custom-to" />
+        <button type="button" class="secondary" data-role="custom-apply">Apply</button>
+      </div>
+
+      <div class="filter-group filter-end">
+        <button type="button" class="secondary" data-role="refresh">Refresh</button>
+      </div>
+
+      <p class="filter-status">
+        <span id="range-summary">Loading…</span>
+        <span class="dot" aria-hidden="true">·</span>
+        <span id="data-through"></span>
+        <span class="dot" aria-hidden="true">·</span>
+        <span id="refreshed-at"></span>
+      </p>
+    </section>
+
+    <main class="grid" id="grid"></main>
 
     <script src="/vendor/chart.umd.js"></script>
     <script type="module" src="/app.js"></script>
