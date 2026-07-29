@@ -22,13 +22,8 @@ function set(id, text, bad = false) {
   el.classList.toggle('bad', bad);
 }
 
-set(
-  'chart-status',
-  typeof window.Chart === 'string' || window.Chart === undefined
-    ? 'Not loaded'
-    : `Chart.js ${window.Chart.version}`,
-  window.Chart === undefined,
-);
+const chart = window.Chart;
+set('chart-status', chart ? `Chart.js ${chart.version}` : 'Not loaded', !chart);
 
 try {
   const health = await api('/api/health');
