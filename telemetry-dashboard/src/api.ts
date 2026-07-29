@@ -26,7 +26,11 @@ const DAY_MS = 86_400_000;
 const MAX_RANGE_DAYS = 366;
 const DEFAULT_RANGE_DAYS = 30;
 
-/** Retention curve length, matching the PostHog dashboard this replaces. */
+/**
+ * Retention curve length. Two weeks covers the day-1 and day-7 cliffs where nearly
+ * all churn happens, and matches the window the previous analytics dashboard drew,
+ * so the numbers stay comparable across the cutover.
+ */
 const RETENTION_DAYS = 14;
 /** Days a machine gets to run its first index before it counts as churned. */
 const DEFAULT_ACTIVATION_WINDOW = 7;

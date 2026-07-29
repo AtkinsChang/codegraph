@@ -117,6 +117,93 @@ secret is `ADMIN_TOKEN`, which enables `POST /admin/rollup`; leave it unset and 
 does not exist. Generate one with `openssl rand -hex 32`, and note that rotating it takes
 effect on the next request.
 
+## Cutover from PostHog (one-time)
+
+The replacement of PostHog by this worker's own D1 storage. It is a **hard cutover with no
+backfill** — PostHog history is disposable, and the new charts start from an empty database.
+**Clients are unaffected at every step:** they keep POSTing to `telemetry.getcodegraph.com`
+and every response shape is unchanged, so no client can tell which storage backend is live.
+
+The one-way door is step 6. Everything before it is reversible with `npx wrangler rollback`,
+which is why the PostHog key stays put until the new path has proven itself for a day.
+
+**Before you start:** `npm run smoke:cutover`. It runs the whole chain locally — a client
+batch through the ingest worker into D1, the nightly rollup over it, then the dashboard
+reading the numbers back — and is the only check that covers the seam between the two
+workers. They are separate deployments that agree on a list of dimension names by
+convention alone, and a mismatch there is silent: no error, no failed request, just a panel
+that reads zero forever.
+
+1. **Put the account on Workers Paid (~$5/mo).** Ingest already runs ~97k requests/day
+   against the free plan's 100k/day cap, so this is overdue independently of D1 — and the
+   included D1 quota (5 GB storage, 50M row writes/mo) comes with it. The volume arithmetic
+   is under [Storage](#storage-cloudflare-d1); at ~97k POSTs/day it fits, with the retention
+   window sized to the 10 GB per-database cap.
+
+2. **Bring the production database up to schema.** `codegraph-telemetry`
+   (`5ed36dfb-d2d7-4e35-9e63-a1b99d0b1ed3`) already exists on the account and is bound in
+   `wrangler.jsonc`; this only applies migrations, and is a no-op if it is already current.
+
+   ```bash
+   cd telemetry-worker
+   npm run db:migrate          # remote; bootstraps from empty
+   npm run db:migrations       # confirm 0001_init is listed as applied
+   ```
+
+3. **Deploy, and note the version you are leaving.** Print the deployment list first — the
+   id at the top is your rollback target for the next 24 hours.
+
+   ```bash
+   npx wrangler deployments list      # record the current version id
+   npm run deploy
+   npx wrangler secret put ADMIN_TOKEN   # if not already set; enables manual rollups
+   ```
+
+4. **Watch for 24 hours before trusting it.** The number that matters is the daily ingest
+   rate: it should track the ~95–97k/day PostHog was seeing. A materially lower number means
+   events are being dropped somewhere between the client and the table — a schema or binding
+   mistake, not a real change in usage.
+
+   ```bash
+   npm run db:sql "select count(*) as rows, max(received_at) as newest from events"
+   npm run db:sql "select day, count(*) from events group by day order by day desc limit 3"
+   ```
+
+   `max(received_at)` should be seconds old at any time of day. Watch Workers Logs
+   (`npx wrangler tail`) alongside it for a non-zero error rate — the D1 write is deliberately
+   fail-silent, so a broken write shows up as a log line and a flat row count, never as a
+   failing request.
+
+   **If anything looks wrong, stop here and `npx wrangler rollback [version-id]`.** PostHog is
+   still live and still holds the key, so rolling back restores the old behaviour completely.
+
+5. **Verify the nightly rollup and the dashboard.** After the first 00:30 UTC cron has run,
+   the completed day must be present in the rollup tables — the dashboard reads those, not raw
+   events, so an empty rollup is an empty dashboard even with ingest working perfectly.
+
+   ```bash
+   npm run db:sql "select day, machines, prod_machines from daily_machines order by day desc limit 3"
+   npm run db:sql "select day, event, count from daily_event_counts order by day desc limit 10"
+   ```
+
+   Then open the dashboard (`stats.getcodegraph.com`, see
+   [`../telemetry-dashboard/README.md`](../telemetry-dashboard/README.md)) and confirm the
+   panels render live numbers rather than empty states. If the cron did not fire, roll the day
+   up by hand with `POST /admin/rollup?day=…` above rather than waiting another 24 hours.
+
+6. **Only now, retire PostHog.** Past this point the previous worker version can still be
+   rolled back, but it will have no key to forward with — this is the step that makes the
+   cutover final.
+
+   ```bash
+   npx wrangler secret delete POSTHOG_KEY   # the last PostHog reference on the account
+   npx wrangler secret list                 # confirm ADMIN_TOKEN is the only secret left
+   ```
+
+   The `POSTHOG_HOST` var and every line of forwarding code are already gone from this repo —
+   `git grep -i posthog telemetry-worker/` returns nothing. Finish by cancelling the PostHog
+   subscription and deleting the project.
+
 ## Local dev & checks
 
 ```bash
@@ -126,6 +213,9 @@ npm run dev                  # http://localhost:8787 (local D1 in .wrangler/)
 npm run smoke                # end-to-end: boots `wrangler dev`, POSTs, asserts stored rows
 npm run smoke:rollup         # end-to-end: seeds synthetic days, rolls them up, purges,
                              # asserts every number against hand-computed values
+npm run smoke:cutover        # the whole chain: a client batch → D1 → rollup → the dashboard
+                             # API reads it back. Boots BOTH workers against one shared local
+                             # D1, so it is the only check that covers the seam between them.
 
 curl -i localhost:8787/v1/events -H 'content-type: application/json' -d '{
   "machine_id": "00000000-0000-4000-8000-000000000000",
