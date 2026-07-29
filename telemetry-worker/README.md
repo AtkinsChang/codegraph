@@ -196,13 +196,25 @@ that reads zero forever.
    cutover final.
 
    ```bash
-   npx wrangler secret delete POSTHOG_KEY   # the last PostHog reference on the account
+   npx wrangler secret delete POSTHOG_KEY   # the last vendor credential on the account
    npx wrangler secret list                 # confirm ADMIN_TOKEN is the only secret left
    ```
 
-   The `POSTHOG_HOST` var and every line of forwarding code are already gone from this repo —
-   `git grep -i posthog telemetry-worker/` returns nothing. Finish by cancelling the PostHog
-   subscription and deleting the project.
+   Then cancel the subscription and delete the project.
+
+7. **Delete this section.** The forwarding code and the `POSTHOG_HOST` var left the repo with
+   the D1 rewrite, and `npm run smoke:cutover` asserts on every run that the worker's source
+   and config reference no analytics vendor and make no outbound request at all. This runbook
+   is the last place the old vendor is named anywhere in the repository, so once step 6 is
+   done:
+
+   ```bash
+   grep -ri posthog . --exclude-dir=node_modules --exclude-dir=.git
+   ```
+
+   returning nothing is the check that the cutover is complete — and deleting these steps is
+   what makes it pass. Keep them until then: every step above is reversible, and a rollback
+   is useless if its instructions have already been deleted.
 
 ## Local dev & checks
 

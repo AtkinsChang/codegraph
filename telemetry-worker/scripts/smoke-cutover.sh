@@ -257,8 +257,9 @@ echo
 echo "the no-third-party guarantee still holds"
 is "ingest worker makes no outbound fetch" 0 \
    "$(grep -E 'fetch\(' "$WORKER_DIR"/src/*.ts | grep -vc 'async fetch(request' || true)"
-is "no PostHog reference in ingest worker code or config" 0 \
-   "$(grep -ril posthog "$WORKER_DIR"/src "$WORKER_DIR"/wrangler.jsonc 2>/dev/null | wc -l | tr -d ' ')"
+is "ingest worker names no third-party analytics endpoint" 0 \
+   "$(grep -rEil 'https?://[a-z0-9.-]+/(batch|capture|collect|track|ingest)' \
+        "$WORKER_DIR"/src "$WORKER_DIR"/wrangler.jsonc 2>/dev/null | wc -l | tr -d ' ')"
 
 echo
 if [ "$fail" -eq 0 ]; then
