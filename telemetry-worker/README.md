@@ -20,6 +20,35 @@ with the npm package — the engine's `files` allowlist excludes it.
   no retries.
 - `GET /` — plain-text pointer to the docs and the off-switches.
 
+## Storage (Cloudflare D1)
+
+Telemetry is stored in the `codegraph-telemetry` D1 database on the same account, bound as
+`env.DB`. The complete schema is [`migrations/0001_init.sql`](migrations/0001_init.sql) —
+checked in for the same reason this worker's source is public: it is the entire list of what
+gets kept, with a comment on every column and on which dashboard chart each rollup table
+serves. Shape: raw sanitized `events`, `daily_*` rollups recomputed nightly, and
+`machine_days` / `machine_first_seen` for retention cohorts. The dashboard reads rollups; raw
+events exist for drill-down and are purged past the retention window.
+
+```bash
+npm run db:migrate:local     # apply to the local .wrangler state (offline, no account needed)
+npm run db:migrate           # apply to the remote codegraph-telemetry database
+npm run db:migrations        # which migrations are applied remotely
+npm run db:sql "select count(*) from events"
+```
+
+Both applies bootstrap from empty and are a no-op when already current. A schema change is a
+new numbered file (`npx wrangler d1 migrations create codegraph-telemetry <name>`) — never an
+edit to a migration that has been applied.
+
+Volume, at ~97k accepted POSTs/day: ≈30M D1 row writes/month against the 50M included on
+Workers Paid. D1 bills a row write per index touched on top of the table row, which is why
+`events` carries only two indexes. Storage is the tighter constraint — raw events grow
+≈74 MB/day, so a 90-day retention window lands at ≈6.7 GB against D1's 10 GB per-database
+cap, while 180 days would exceed it. Rollups are tiny and kept forever, so shortening the raw
+window costs drill-back, never a chart. Full arithmetic and the levers are in the migration's
+footer comment.
+
 ## Deploy
 
 Prereqs: the `getcodegraph.com` zone on the deploying Cloudflare account (the custom
@@ -30,6 +59,7 @@ cd telemetry-worker
 npm install
 npx wrangler login                      # once
 npx wrangler secret put POSTHOG_KEY     # the phc_… project write key — never committed
+npm run db:migrate                      # bring the D1 schema up to date first
 npm run deploy
 ```
 

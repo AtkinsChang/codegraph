@@ -18,6 +18,18 @@
   // Non-secret config. Swap host here if the backend ever moves (EU, self-hosted…).
   "vars": { "POSTHOG_HOST": "https://us.i.posthog.com" },
 
+  // Telemetry storage. Schema + the chart each table serves: migrations/0001_init.sql.
+  // Apply with `npm run db:migrate:local` (local state) / `npm run db:migrate` (remote).
+  // The admin dashboard worker binds this same database read-mostly, also as `DB`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "codegraph-telemetry",
+      "database_id": "5ed36dfb-d2d7-4e35-9e63-a1b99d0b1ed3",
+      "migrations_dir": "migrations"
+    }
+  ],
+
   // Per-machine_id rate limit. Legit clients flush a handful of times per day;
   // 6/min absorbs install+index bursts while capping abuse.
   "ratelimits": [
