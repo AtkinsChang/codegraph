@@ -1,0 +1,17 @@
+{
+  "name": "codegraph-telemetry-dashboard",
+  "private": true,
+  "description": "Password-gated admin dashboard over the codegraph telemetry D1 database (stats.getcodegraph.com)",
+  "scripts": {
+    "vendor": "node scripts/vendor-assets.mjs",
+    "dev": "npm run vendor && wrangler dev",
+    "deploy": "npm run vendor && wrangler deploy",
+    "types": "wrangler types",
+    "check": "npm run vendor && wrangler types && tsc --noEmit && wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "chart.js": "^4.4.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^4.36.0"
+  }
+}
