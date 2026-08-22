@@ -71,6 +71,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Files skipped because they are too large or repeatedly fail to parse are now recorded with the reason, so unchanged rejected files are no longer rediscovered and retried on every status check and sync — and a later successful parse of such a file replaces the record with its real symbols. Thanks @netbrah for the exceptional failure analysis behind this batch, and @danusha2345 for the fixes. (#1557)
 - C/C++ function-pointer analysis now bounds its compiled-pattern caches, so very large repositories can no longer exhaust the JavaScript engine's regular-expression code space during indexing. (#1559)
 - JSX rendering analysis now runs only on JavaScript-family files, so JSX-looking strings in C/C++ (or any other language) no longer create impossible call edges — in pure-C projects and in mixed-language monorepos alike. (#1560)
+- A C++ `.h` header whose only C++ construct is a plain derived type — `struct Derived : Base` with no export macro, `class` keyword, or access section — is now recognized as C++ (previously only the export-macro form was). Such a header was read as C, so the derived struct vanished from the index and a phantom function named after the base type appeared in its place. The check now also covers the whole file rather than its first few kilobytes, so a long C-compatible preamble no longer hides the signal. Re-index after upgrading to pick up affected headers. Thanks @Jaysenpeng. (#1592)
 
 ## [1.5.0] - 2026-07-21
 
