@@ -71,6 +71,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Files skipped because they are too large or repeatedly fail to parse are now recorded with the reason, so unchanged rejected files are no longer rediscovered and retried on every status check and sync — and a later successful parse of such a file replaces the record with its real symbols. Thanks @netbrah for the exceptional failure analysis behind this batch, and @danusha2345 for the fixes. (#1557)
 - C/C++ function-pointer analysis now bounds its compiled-pattern caches, so very large repositories can no longer exhaust the JavaScript engine's regular-expression code space during indexing. (#1559)
 - JSX rendering analysis now runs only on JavaScript-family files, so JSX-looking strings in C/C++ (or any other language) no longer create impossible call edges — in pure-C projects and in mixed-language monorepos alike. (#1560)
+- Calls to the methods of an exported object-literal constant — `export const api = { call() { … } }` used as a module's namespace, a common way to organize a TypeScript API surface — now resolve to the method, both in the defining file and through imports. Previously such a call linked to nothing (or to the constant itself), so `codegraph callers` and impact analysis reported zero callers for methods that are called from everywhere. Re-index after upgrading to pick up the edges. Thanks @IAliceBobI for the precise report and root-cause. (#1573)
 
 ## [1.5.0] - 2026-07-21
 
