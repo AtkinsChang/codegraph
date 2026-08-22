@@ -71,6 +71,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Files skipped because they are too large or repeatedly fail to parse are now recorded with the reason, so unchanged rejected files are no longer rediscovered and retried on every status check and sync — and a later successful parse of such a file replaces the record with its real symbols. Thanks @netbrah for the exceptional failure analysis behind this batch, and @danusha2345 for the fixes. (#1557)
 - C/C++ function-pointer analysis now bounds its compiled-pattern caches, so very large repositories can no longer exhaust the JavaScript engine's regular-expression code space during indexing. (#1559)
 - JSX rendering analysis now runs only on JavaScript-family files, so JSX-looking strings in C/C++ (or any other language) no longer create impossible call edges — in pure-C projects and in mixed-language monorepos alike. (#1560)
+- Indexing no longer crashes the whole process — a segmentation fault with no message and no partial index — on a C/C++ (or any other) file with extremely deep nesting, such as the parser stress-test fixtures in the clang and gcc test suites or a fuzzer corpus. Such a file is now handed to the fallback parser and recorded with a parse warning while the rest of the repository indexes normally. Thanks @apollo600 for the exact diagnosis. (#1581)
 
 ## [1.5.0] - 2026-07-21
 
