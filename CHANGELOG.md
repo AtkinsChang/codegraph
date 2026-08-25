@@ -25,6 +25,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- Erlang functions that share a name but differ in arity are now separate symbols with the language's own `module:fun/arity` identity, so the everyday `f/1` delegating to `f/2` shows as a real call edge instead of a self-loop, each arity keeps its own `-spec` and source span, `-export([f/1])` marks exactly that arity as public, and asking `codegraph_explore` for a symbol the way Erlang spells it — `cowboy_req:header/3` — returns that definition. Re-index Erlang projects after upgrading. Thanks @Dshuishui. (#1610) (Erlang)
+
+- Erlang behaviour dispatch no longer miscounts a call site's arity when an argument is a binary literal like `<<1,2,3>>` — the commas inside were counted as argument separators, which silently dropped (or could mislink) the dispatch edge to the behaviour callback. (#1358) (Erlang)
+
 - Indexing no longer hangs on a Swift Vapor project containing a call with a long argument list. A single `.get(...)`-style call with many labeled arguments and no `use:` handler — the shape generated request builders produce — could stall `codegraph index`, `codegraph sync`, and the MCP server indefinitely. Route detection now handles such files in milliseconds, and every previously-recognized route shape still parses exactly as before. Thanks @maxmilian. (#1544) (Swift)
 
 - `codegraph status` now sees new files inside brand-new directories. Git reports an entirely-untracked directory as a single collapsed entry, so source files created there — a freshly scaffolded `frontend/`, for example — were missing from the pending-changes report, which could claim everything was up to date while those files had not yet been indexed. Thanks @maxmilian. (#1213)
