@@ -72,6 +72,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - C/C++ function-pointer analysis now bounds its compiled-pattern caches, so very large repositories can no longer exhaust the JavaScript engine's regular-expression code space during indexing. (#1559)
 - JSX rendering analysis now runs only on JavaScript-family files, so JSX-looking strings in C/C++ (or any other language) no longer create impossible call edges — in pure-C projects and in mixed-language monorepos alike. (#1560)
 
+- The `codegraph context <task>` command documented in the CLI help now actually exists — it builds a ready-to-inject context pack for a task (relevant symbols, their relationships, and code) in markdown or JSON, restoring the contract external integrations like Memorix rely on (`--path`, `--format json`, `--max-nodes`, `--no-code`). (#1611)
+
 ## [1.5.0] - 2026-07-21
 
 # ⚡ The Rust engine release — with near-instant sync
