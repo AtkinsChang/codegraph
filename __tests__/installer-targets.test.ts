@@ -22,7 +22,13 @@ import { parse as parseJsonc } from 'jsonc-parser';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry';
 import { uninstallTargets, refreshTargets } from '../src/installer';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml';
-import { cleanupLegacyHooks, writePromptHookEntry, removePromptHookEntry } from '../src/installer/targets/claude';
+import {
+  cleanupLegacyHooks,
+  writePromptHookEntry,
+  removePromptHookEntry,
+  writeSessionHookEntries,
+  removeSessionHookEntries,
+} from '../src/installer/targets/claude';
 
 function mkTmpDir(label: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cg-targets-${label}-`));
@@ -1304,6 +1310,196 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(promptCommands(s)).not.toContain(HOOK_CMD);
     const stopCmds = (s.hooks?.Stop ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
     expect(stopCmds).toContain('codegraph sync-if-dirty');
+  });
+
+  // ---- Per-context session hooks (PreToolUse / PostCompact) ----
+  // These are the delivery mechanism for per-context dedup: without them the
+  // already-sent record stays keyed per MCP connection and a subagent —
+  // dispatching over its parent's — is told source was "already sent" to a
+  // context that never received it. Written unconditionally by install (no
+  // opt-in flag), so the surgery has to be exact: the user's own hooks under
+  // the same events survive install AND uninstall.
+  const commandsFor = (s: any, event: string): string[] =>
+    (s.hooks?.[event] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+  const readSettings = (loc: 'global' | 'local'): any =>
+    JSON.parse(fs.readFileSync(path.join(loc === 'global' ? tmpHome : tmpCwd, '.claude', 'settings.json'), 'utf-8'));
+
+  it('claude: install wires both session hooks under the right events', () => {
+    getTarget('claude')!.install('global', { autoAllow: true });
+    const s = readSettings('global');
+
+    const preToolUse = s.hooks.PreToolUse.find((g: any) =>
+      (g.hooks ?? []).some((h: any) => h.command.includes('hooks pre-tool-use')));
+    // The MCP server name is the user's to rename, so the matcher keys on the
+    // tool SUFFIX rather than a fixed mcp__codegraph__ prefix.
+    expect(preToolUse.matcher).toBe('mcp__.*__codegraph_explore');
+    expect(new RegExp(preToolUse.matcher).test('mcp__my-renamed-server__codegraph_explore')).toBe(true);
+
+    expect(commandsFor(s, 'PostCompact').some((c: string) => c.includes('hooks post-compact'))).toBe(true);
+    // PostCompact fires once compaction has completed — PreCompact would run
+    // while the agent still holds the source, so it is deliberately not used,
+    // and neither is SessionStart (this event covers auto-compact explicitly).
+    expect(s.hooks.PreCompact).toBeUndefined();
+    expect(s.hooks.SessionStart).toBeUndefined();
+
+    for (const event of ['PreToolUse', 'PostCompact']) {
+      expect(commandsFor(s, event).every((c: string) => c.includes('codegraph'))).toBe(true);
+    }
+  });
+
+  it('claude: session hooks install is idempotent (no duplicate, byte-identical re-run)', () => {
+    const claude = getTarget('claude')!;
+    const file = path.join(tmpHome, '.claude', 'settings.json');
+    claude.install('global', { autoAllow: true });
+    const first = fs.readFileSync(file, 'utf-8');
+    expect(writeSessionHookEntries('global').action).toBe('unchanged');
+    claude.install('global', { autoAllow: true });
+    expect(fs.readFileSync(file, 'utf-8')).toBe(first);
+
+    const s = JSON.parse(first);
+    expect(commandsFor(s, 'PreToolUse').filter((c: string) => c.includes('hooks pre-tool-use'))).toHaveLength(1);
+    expect(commandsFor(s, 'PostCompact').filter((c: string) => c.includes('hooks post-compact'))).toHaveLength(1);
+  });
+
+  // The user's PostCompact hook carries NO matcher — the shape that event uses —
+  // so this doubles as coverage that a matcher-less group survives our surgery.
+  const userHooks = (): Record<string, any> => ({
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-bash-guard' }] }],
+      PostCompact: [{ hooks: [{ type: 'command', command: 'my-compact-note' }] }],
+    },
+  });
+
+  it('claude: install preserves the user\'s own hooks under the same events', () => {
+    seedSettings('global', userHooks());
+    getTarget('claude')!.install('global', { autoAllow: true });
+    const s = readSettings('global');
+    expect(commandsFor(s, 'PreToolUse')).toContain('my-bash-guard');
+    expect(commandsFor(s, 'PostCompact')).toContain('my-compact-note');
+    // The user's groups are untouched — ours is appended as its own.
+    expect(s.hooks.PreToolUse[0]).toEqual({ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-bash-guard' }] });
+    expect(s.hooks.PostCompact[0]).toEqual({ hooks: [{ type: 'command', command: 'my-compact-note' }] });
+  });
+
+  it('claude: uninstall removes exactly our two entries and leaves the user\'s', () => {
+    seedSettings('global', userHooks());
+    getTarget('claude')!.install('global', { autoAllow: true });
+    getTarget('claude')!.uninstall('global');
+    const s = readSettings('global');
+    expect(commandsFor(s, 'PreToolUse')).toEqual(['my-bash-guard']);
+    // A matcher-less sibling group survives verbatim: the removal keys on the
+    // command, never on the group's matcher.
+    expect(s.hooks.PostCompact).toEqual([{ hooks: [{ type: 'command', command: 'my-compact-note' }] }]);
+  });
+
+  it('claude: uninstall reverses install, leaving no hook structures behind', () => {
+    const claude = getTarget('claude')!;
+    claude.install('global', { autoAllow: true });
+    claude.uninstall('global');
+    const s = readSettings('global');
+    // Nothing else lived under these events, so the events — and `hooks`
+    // itself, which we created — are pruned rather than left as husks.
+    expect(s.hooks).toBeUndefined();
+  });
+
+  it('claude: re-install re-points a session hook whose binary path went stale', () => {
+    seedSettings('global', {
+      hooks: {
+        PreToolUse: [{
+          matcher: 'mcp__.*__codegraph_explore',
+          hooks: [{ type: 'command', command: '/gone/versions/v0.0.1/bin/codegraph hooks pre-tool-use' }],
+        }],
+      },
+    });
+    expect(writeSessionHookEntries('global').action).toBe('updated');
+    const s = readSettings('global');
+    // Rewritten in place, never duplicated: recognition is by the subcommand
+    // WITHOUT its flags, so both a path from an older install and a flag set
+    // that has since changed are ours to heal — the seed above carries neither
+    // the current path nor `--agent`, and comes back with both.
+    const pre = commandsFor(s, 'PreToolUse');
+    expect(pre).toHaveLength(1);
+    expect(pre[0]).not.toContain('/gone/');
+    expect(pre[0]).toContain('hooks pre-tool-use --agent claude');
+  });
+
+  it('claude: session-hook removal leaves the prompt hook and legacy hooks alone', () => {
+    seedSettings('global', {
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: HOOK_CMD }] }],
+        Stop: [{ hooks: [{ type: 'command', command: 'codegraph sync-if-dirty' }] }],
+      },
+    });
+    writeSessionHookEntries('global');
+    expect(removeSessionHookEntries('global').action).toBe('removed');
+    const s = readSettings('global');
+    expect(commandsFor(s, 'UserPromptSubmit')).toEqual([HOOK_CMD]);
+    expect(commandsFor(s, 'Stop')).toEqual(['codegraph sync-if-dirty']);
+    expect(s.hooks.PreToolUse).toBeUndefined();
+    expect(s.hooks.PostCompact).toBeUndefined();
+  });
+
+  it('claude: install never overwrites a non-array under a hook event', () => {
+    seedSettings('global', { hooks: { PreToolUse: { unexpected: 'user shape' } } });
+    getTarget('claude')!.install('global', { autoAllow: true });
+    const s = readSettings('global');
+    expect(s.hooks.PreToolUse).toEqual({ unexpected: 'user shape' });
+    // The other event still gets wired — one odd key doesn't block the install.
+    expect(commandsFor(s, 'PostCompact').some((c: string) => c.includes('hooks post-compact'))).toBe(true);
+  });
+
+  /**
+   * Fabricate the bundle layout `detectInstallMethod` recognizes — a vendored
+   * node and a launcher as siblings of `lib/` — and point argv[1] at the JS
+   * entry inside it, exactly as the real launcher does.
+   */
+  function asBundledBinary<T>(root: string, run: () => T): T {
+    const launcherName = process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph';
+    fs.mkdirSync(path.join(root, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'lib', 'dist', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(root, process.platform === 'win32' ? 'node.exe' : 'node'), '');
+    fs.writeFileSync(path.join(root, 'bin', launcherName), '');
+    const prev = process.argv[1];
+    process.argv[1] = path.join(root, 'lib', 'dist', 'bin', 'codegraph.js');
+    try { return run(); } finally { process.argv[1] = prev; }
+  }
+
+  it('claude: prefers the absolute launcher over PATH when running from a bundle', () => {
+    const root = path.join(tmpCwd, 'bundle', 'versions', 'v1.2.3');
+    const launcher = path.join(root, 'bin', process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph');
+    asBundledBinary(root, () => getTarget('claude')!.install('global', { autoAllow: true }));
+    const s = readSettings('global');
+    expect(commandsFor(s, 'PreToolUse')).toEqual([`${launcher} hooks pre-tool-use --agent claude`]);
+    expect(commandsFor(s, 'PostCompact')).toEqual([`${launcher} hooks post-compact`]);
+  });
+
+  it('claude: quotes a launcher path containing spaces — hook commands are shell strings', () => {
+    const root = path.join(tmpCwd, 'My Tools', 'versions', 'v1.2.3');
+    const launcher = path.join(root, 'bin', process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph');
+    asBundledBinary(root, () => writeSessionHookEntries('global'));
+    expect(commandsFor(readSettings('global'), 'PreToolUse')).toEqual([`"${launcher}" hooks pre-tool-use --agent claude`]);
+  });
+
+  it('claude: falls back to the PATH spelling when there is no installed bundle', () => {
+    // vitest's argv[1] is not a bundle layout — the source/npm/npx case.
+    getTarget('claude')!.install('global', { autoAllow: true });
+    const expected = process.platform === 'win32' ? 'codegraph.cmd' : 'codegraph';
+    expect(commandsFor(readSettings('global'), 'PreToolUse')).toEqual([`${expected} hooks pre-tool-use --agent claude`]);
+  });
+
+  it('claude: session hooks are Claude-only — no other target writes them', () => {
+    for (const target of ALL_TARGETS) {
+      if (target.id === 'claude') continue;
+      target.install('global', { autoAllow: true });
+    }
+    // Codex is immune by construction (per-thread connections); Cursor and
+    // opencode have no equivalent hook system. None of them may grow one here.
+    const settings = path.join(tmpHome, '.claude', 'settings.json');
+    if (fs.existsSync(settings)) {
+      const s = JSON.parse(fs.readFileSync(settings, 'utf-8'));
+      expect(commandsFor(s, 'PreToolUse')).toEqual([]);
+      expect(commandsFor(s, 'PostCompact')).toEqual([]);
+    }
   });
 });
 
