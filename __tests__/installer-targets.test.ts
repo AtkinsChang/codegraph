@@ -29,6 +29,7 @@ import {
   writeSessionHookEntries,
   removeSessionHookEntries,
 } from '../src/installer/targets/claude';
+import { codexHookTrustHash } from '../src/installer/targets/codex';
 
 function mkTmpDir(label: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cg-targets-${label}-`));
@@ -133,9 +134,14 @@ describe('Installer targets — contract', () => {
             // and verify the sibling survives. Skip for Codex (TOML)
             // and any target with no JSON config — they get covered
             // by their own dedicated tests below.
-            const paths = target.describePaths(location);
+            //
+            // Keyed on detect()'s configPath — the target's own answer for
+            // "where does my MCP entry live" — rather than scanning
+            // describePaths for a .json, which also turns up files that are
+            // written but hold no MCP config (codex's hooks.json).
+            const mcpConfig = target.detect(location).configPath;
             // Match .json or .jsonc — opencode prefers .jsonc.
-            const jsonPath = paths.find((p) => /\.jsonc?$/.test(p));
+            const jsonPath = /\.jsonc?$/.test(mcpConfig) ? mcpConfig : undefined;
             if (!jsonPath) return;
 
             // Seed pre-existing config.
@@ -963,7 +969,11 @@ describe('Installer targets — partial-state idempotency', () => {
     const afterInstall = fs.readFileSync(tomlPath, 'utf-8');
     expect(afterInstall).toContain('command = "codegraph"');
     expect(afterInstall).not.toContain('[[not-a-table]]');
-    expect(afterInstall.endsWith(historyTables)).toBe(true);
+    // The array-of-tables survives verbatim. It no longer ends the file — the
+    // hooks' trust records append after it, which is what closes the last
+    // `[[history]]` element — but not a byte of it is rewritten or reordered.
+    expect(afterInstall).toContain(historyTables.trimEnd());
+    expect(afterInstall.match(/\[\[history\]\]/g)).toHaveLength(2);
 
     const second = codex.install('global', { autoAllow: false });
     expect(second.files.find((f) => f.path === tomlPath)?.action).toBe('unchanged');
@@ -971,6 +981,246 @@ describe('Installer targets — partial-state idempotency', () => {
 
     codex.uninstall('global');
     expect(fs.readFileSync(tomlPath, 'utf-8')).toBe(historyTables);
+  });
+
+  // ---- Codex per-context session hooks (hooks.json) ----
+  // Codex reads hooks from a hooks.json in each config layer's .codex/ folder.
+  // Same two entries as the Claude target, spelled codex's way: PreToolUse with
+  // a regex over the tool name, and PostCompact with no matcher at all. Trust
+  // is held per ENTRY in config.toml's
+  // [hooks.state], which the installer must never write — adding entries leaves
+  // the user's already-trusted hooks trusted, and ours await their review.
+  const hooksPathFor = (loc: 'global' | 'local'): string =>
+    path.join(loc === 'global' ? tmpHome : tmpCwd, '.codex', 'hooks.json');
+  const hookCommandsFor = (file: string, event: string): string[] => {
+    const root = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return (root.hooks?.[event] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+  };
+
+  for (const location of ['global', 'local'] as const) {
+    it(`codex: install writes both session hooks to ${location} hooks.json`, () => {
+      const result = getTarget('codex')!.install(location, { autoAllow: false });
+      const file = hooksPathFor(location);
+      expect(fs.existsSync(file)).toBe(true);
+      expect(result.files.find((f) => f.path === file)?.action).toBe('created');
+
+      const root = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      const preToolUse = root.hooks.PreToolUse.find((g: any) =>
+        (g.hooks ?? []).some((h: any) => h.command.includes('hooks pre-tool-use')));
+      expect(preToolUse.matcher).toBe('codegraph_explore');
+      expect(preToolUse.hooks[0].type).toBe('command');
+      // --agent codex is what makes the hook pair permissionDecision with the
+      // rewrite; codex drops an unpaired one, and no other agent gets the field.
+      expect(preToolUse.hooks[0].command).toMatch(/hooks pre-tool-use --agent codex$/);
+      // PostCompact: codex fires it only when compaction succeeded, and every
+      // failure path returns before the history rewrite commits — so the skip
+      // on failure is correct, and PreCompact would clear a still-valid record.
+      expect(hookCommandsFor(file, 'PostCompact').some((c) => c.includes('hooks post-compact'))).toBe(true);
+      expect(root.hooks.PreCompact).toBeUndefined();
+
+      // The hooks.json write surfaces ONLY as the Created/Updated file line
+      // asserted above — no prose about it. Codex's own TUI is where untrusted
+      // hooks surface, so the install output stays a list of file actions.
+      expect((result.notes ?? []).some((n) => n.includes('hooks.json'))).toBe(false);
+    });
+  }
+
+  /**
+   * The trust hash reimplements a codex internal, so it is pinned against a
+   * REAL trusted pair — a hooks.json group and the `trusted_hash` codex itself
+   * wrote for it. If codex changes its normalization this test fails loudly
+   * here rather than silently leaving users with entries codex reports as
+   * needing review.
+   */
+  it('codex: reproduces the trust hash codex itself writes', () => {
+    // Verbatim from a real ~/.codex/hooks.json + config.toml pair: a PreToolUse
+    // group matching `spawn_agent$` with one command handler and no timeout.
+    expect(codexHookTrustHash(
+      'PreToolUse',
+      'spawn_agent$',
+      '/home/atkins/.codex/hooks/subagent.py',
+      'Validating subagent runtime profile',
+    )).toBe('sha256:dd9550baea8600a2d1a58f765a532ac503baf8c786cd4c0d3b76742874961733');
+    expect(codexHookTrustHash(
+      'PostToolUse',
+      'spawn_agent$',
+      '/home/atkins/.codex/hooks/subagent.py',
+      'Rendering subagent runtime profile',
+    )).toBe('sha256:e5c757d1ea8dbffed4b43dd9f8a994bcb60e927b30a60d8d488972e8eef62d0d');
+    // A matcher-less group omits the key entirely rather than sending an empty
+    // string — TOML has no null, so codex's own serialization drops it.
+    expect(codexHookTrustHash('PostCompact', undefined, 'x'))
+      .not.toBe(codexHookTrustHash('PostCompact', '', 'x'));
+  });
+
+  it('codex: reports the hooks file as a plain file action, nothing more', () => {
+    const result = getTarget('codex')!.install('global', { autoAllow: false });
+    // Pre-trusting is not narrated anywhere in the output — the hooks file
+    // reports exactly like every other file the installer touches.
+    expect(result.files.find((f) => f.path === hooksPathFor('global')))
+      .toEqual({ path: hooksPathFor('global'), action: 'created' });
+    expect((result.notes ?? []).some((n) => /trust/i.test(n))).toBe(false);
+  });
+
+  it('codex: records ONLY our two entries, with codex-shaped keys', () => {
+    getTarget('codex')!.install('global', { autoAllow: false });
+    const tomlPath = path.join(tmpHome, '.codex', 'config.toml');
+    const toml = fs.readFileSync(tomlPath, 'utf-8');
+    const hooksFile = hooksPathFor('global');
+
+    // Key is <source>:<snake_case event>:<group index>:<handler index>.
+    for (const event of ['pre_tool_use', 'post_compact']) {
+      expect(toml).toContain(`[hooks.state."${hooksFile}:${event}:0:0"]`);
+    }
+    // Exactly two records, and each hash matches what our hooks.json says.
+    expect(toml.match(/trusted_hash/g)).toHaveLength(2);
+    const root = JSON.parse(fs.readFileSync(hooksFile, 'utf-8'));
+    const preCmd = root.hooks.PreToolUse[0].hooks[0].command;
+    expect(toml).toContain(codexHookTrustHash('PreToolUse', 'codegraph_explore', preCmd));
+    expect(toml).toContain(codexHookTrustHash('PostCompact', undefined, root.hooks.PostCompact[0].hooks[0].command));
+  });
+
+  it('codex: auto-trust never rewrites the user\'s own trust records', () => {
+    const tomlPath = path.join(tmpHome, '.codex', 'config.toml');
+    fs.mkdirSync(path.dirname(tomlPath), { recursive: true });
+    fs.writeFileSync(tomlPath, [
+      '[hooks.state."/home/u/.codex/hooks.json:pre_tool_use:0:0"]',
+      'trusted_hash = "sha256:theirs"',
+      'enabled = true',
+      '',
+    ].join('\n'));
+
+    getTarget('codex')!.install('global', { autoAllow: false });
+    const toml = fs.readFileSync(tomlPath, 'utf-8');
+    // Trust is per entry, so theirs is unreachable from ours — byte-for-byte.
+    expect(toml).toContain('[hooks.state."/home/u/.codex/hooks.json:pre_tool_use:0:0"]');
+    expect(toml).toContain('trusted_hash = "sha256:theirs"');
+    expect(toml).toContain('enabled = true');
+  });
+
+  it('codex: re-trusting an upgraded launcher keeps the user\'s enabled flag', () => {
+    const codex = getTarget('codex')!;
+    codex.install('global', { autoAllow: false });
+    const tomlPath = path.join(tmpHome, '.codex', 'config.toml');
+    const key = `${hooksPathFor('global')}:pre_tool_use:0:0`;
+
+    // The user disabled our hook in the Codex TUI, then upgraded — the launcher
+    // path is part of the hashed identity, so the hash must be refreshed
+    // WITHOUT re-enabling a hook they turned off.
+    let toml = fs.readFileSync(tomlPath, 'utf-8');
+    toml = toml.replace(`[hooks.state."${key}"]`, `[hooks.state."${key}"]\nenabled = false`);
+    fs.writeFileSync(tomlPath, toml);
+    // Only the binary moves; the subcommand must survive or this stops being an
+    // upgrade and becomes an unrecognized hook.
+    const stale = fs.readFileSync(hooksPathFor('global'), 'utf-8')
+      .replace('"command": "codegraph hooks pre-tool-use', '"command": "/old/bin/codegraph hooks pre-tool-use');
+    fs.writeFileSync(hooksPathFor('global'), stale);
+    const staleHash = codexHookTrustHash('PreToolUse', 'codegraph_explore', '/old/bin/codegraph hooks pre-tool-use --agent codex');
+
+    codex.install('global', { autoAllow: false });
+    const after = fs.readFileSync(tomlPath, 'utf-8');
+    expect(after).toContain('enabled = false');
+    expect(after.match(/trusted_hash/g)).toHaveLength(2);
+    // Refreshed to the new launcher, in place — not left on the old one.
+    expect(after).not.toContain(staleHash);
+    expect(after).toContain(codexHookTrustHash('PreToolUse', 'codegraph_explore', 'codegraph hooks pre-tool-use --agent codex'));
+  });
+
+  it('codex: auto-trust is idempotent and uninstall removes only our records', () => {
+    const codex = getTarget('codex')!;
+    const tomlPath = path.join(tmpHome, '.codex', 'config.toml');
+    fs.mkdirSync(path.dirname(tomlPath), { recursive: true });
+    fs.writeFileSync(tomlPath, '[hooks.state."other:pre_tool_use:0:0"]\ntrusted_hash = "sha256:theirs"\n');
+
+    codex.install('global', { autoAllow: false });
+    const first = fs.readFileSync(tomlPath, 'utf-8');
+    codex.install('global', { autoAllow: false });
+    expect(fs.readFileSync(tomlPath, 'utf-8')).toBe(first);
+
+    codex.uninstall('global');
+    const after = fs.readFileSync(tomlPath, 'utf-8');
+    expect(after).toContain('other:pre_tool_use:0:0');
+    expect(after).toContain('sha256:theirs');
+    expect(after).not.toContain(hooksPathFor('global'));
+  });
+
+  it('codex: hooks install is idempotent (no duplicate, byte-identical re-run)', () => {
+    const codex = getTarget('codex')!;
+    const file = hooksPathFor('global');
+    codex.install('global', { autoAllow: false });
+    const first = fs.readFileSync(file, 'utf-8');
+
+    const second = codex.install('global', { autoAllow: false });
+    expect(second.files.find((f) => f.path === file)?.action).toBe('unchanged');
+    expect(fs.readFileSync(file, 'utf-8')).toBe(first);
+    expect(hookCommandsFor(file, 'PreToolUse')).toHaveLength(1);
+    expect(hookCommandsFor(file, 'PostCompact')).toHaveLength(1);
+  });
+
+  it('codex: install preserves the user\'s own hooks and unrelated top-level keys', () => {
+    const file = hooksPathFor('global');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      description: 'my hooks',
+      hooks: {
+        PreToolUse: [{ matcher: '^Bash$', hooks: [{ type: 'command', command: 'my-guard' }] }],
+        SessionEnd: [{ hooks: [{ type: 'command', command: 'my-cleanup' }] }],
+      },
+    }, null, 2) + '\n');
+
+    getTarget('codex')!.install('global', { autoAllow: false });
+    const root = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(root.description).toBe('my hooks');
+    expect(hookCommandsFor(file, 'SessionEnd')).toEqual(['my-cleanup']);
+    // Ours is APPENDED — codex keys a hook's trust record on its group index,
+    // so inserting ahead of the user's groups would renumber (and untrust) them.
+    expect(root.hooks.PreToolUse[0]).toEqual({
+      matcher: '^Bash$', hooks: [{ type: 'command', command: 'my-guard' }],
+    });
+    expect(root.hooks.PreToolUse).toHaveLength(2);
+  });
+
+  it('codex: uninstall removes exactly our entries and leaves the user\'s', () => {
+    const file = hooksPathFor('global');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      description: 'my hooks',
+      hooks: { PreToolUse: [{ matcher: '^Bash$', hooks: [{ type: 'command', command: 'my-guard' }] }] },
+    }, null, 2) + '\n');
+
+    const codex = getTarget('codex')!;
+    codex.install('global', { autoAllow: false });
+    codex.uninstall('global');
+
+    const root = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(root.description).toBe('my hooks');
+    expect(hookCommandsFor(file, 'PreToolUse')).toEqual(['my-guard']);
+    expect(root.hooks.PostCompact).toBeUndefined();
+  });
+
+  it('codex: uninstall deletes a hooks.json that held only our entries', () => {
+    const codex = getTarget('codex')!;
+    const file = hooksPathFor('global');
+    codex.install('global', { autoAllow: false });
+    expect(fs.existsSync(file)).toBe(true);
+
+    codex.uninstall('global');
+    // We created it and nothing else ever lived there — no empty husk left.
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('codex: leaves an unparseable hooks.json exactly as it is', () => {
+    const file = hooksPathFor('global');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const broken = '{ "hooks": { "PreToolUse": [ }}} not json';
+    fs.writeFileSync(file, broken);
+
+    const result = getTarget('codex')!.install('global', { autoAllow: false });
+    // Never clobbered, never backed up and replaced: codex would then run our
+    // file instead of the config we failed to read.
+    expect(fs.readFileSync(file, 'utf-8')).toBe(broken);
+    expect(result.files.find((f) => f.path === file)?.action).toBe('unchanged');
+    expect(fs.existsSync(`${file}.backup`)).toBe(false);
   });
 
   it('claude: local install writes ./.mcp.json (project scope), not ./.claude.json', () => {
@@ -1487,18 +1737,30 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(commandsFor(readSettings('global'), 'PreToolUse')).toEqual([`${expected} hooks pre-tool-use --agent claude`]);
   });
 
-  it('claude: session hooks are Claude-only — no other target writes them', () => {
-    for (const target of ALL_TARGETS) {
-      if (target.id === 'claude') continue;
-      target.install('global', { autoAllow: true });
-    }
-    // Codex is immune by construction (per-thread connections); Cursor and
-    // opencode have no equivalent hook system. None of them may grow one here.
+  it('session hooks reach Claude and Codex only — no other target writes them', () => {
+    // Codex's per-thread connections mean it never needs the stamp for
+    // ISOLATION, but the post-compact reset still has to name a bucket, so it
+    // wires hooks of its own (see the codex cases above). Every remaining
+    // target has no equivalent hook system, and none may quietly grow one.
+    const others = ALL_TARGETS.filter((t) => t.id !== 'claude' && t.id !== 'codex');
+    for (const target of others) target.install('global', { autoAllow: true });
+
+    // Claude's own settings.json must not have been touched by any of them.
     const settings = path.join(tmpHome, '.claude', 'settings.json');
     if (fs.existsSync(settings)) {
       const s = JSON.parse(fs.readFileSync(settings, 'utf-8'));
       expect(commandsFor(s, 'PreToolUse')).toEqual([]);
       expect(commandsFor(s, 'PostCompact')).toEqual([]);
+    }
+
+    // Nor may any of their OWN config files carry a codegraph hook command.
+    for (const target of others) {
+      for (const file of target.describePaths('global')) {
+        if (!fs.existsSync(file) || !/\.jsonc?$/.test(file)) continue;
+        const body = fs.readFileSync(file, 'utf-8');
+        expect(body, `${target.id} → ${file}`).not.toContain('hooks pre-tool-use');
+        expect(body, `${target.id} → ${file}`).not.toContain('hooks post-compact');
+      }
     }
   });
 });

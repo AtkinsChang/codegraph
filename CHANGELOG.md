@@ -14,7 +14,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
-- Two new hook entry points let a host agent tell CodeGraph which context is calling: `codegraph hooks pre-tool-use` tags each `codegraph_explore` call with the agent that made it, and `codegraph hooks post-compact` clears that context's already-sent record after a compaction. `codegraph install` wires them into Claude Code automatically, so already-sent tracking follows each subagent and each compacted session instead of the connection they share; `codegraph uninstall` removes them, and hooks you added yourself are left alone either way. Other agents are unaffected — nothing changes for hosts that don't run them.
+- Two new hook entry points let a host agent tell CodeGraph which context is calling: `codegraph hooks pre-tool-use` tags each `codegraph_explore` call with the agent that made it, and `codegraph hooks post-compact` clears that context's already-sent record after a compaction. `codegraph install` wires them into Claude Code and Codex automatically — on Codex they are recorded as trusted as they are written, so it doesn't stop to ask you to review them — and already-sent tracking then follows each subagent and each compacted session instead of the connection they share. `codegraph uninstall` removes them, and hooks you added yourself are left alone either way. Other agents are unaffected — nothing changes for hosts that don't run them.
 
 ### Fixes
 
