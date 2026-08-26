@@ -12,6 +12,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- `codegraph_explore` no longer tells a subagent that source was "already sent" when it went to a different agent. Harnesses like Claude Code route a subagent's tool calls over the same connection to CodeGraph as the main agent, so a fresh subagent could be handed a pointer to code its own context never received — and it would go read the file instead. Already-sent tracking is now kept per calling context.
+
 
 ## [1.6.0] - 2026-08-26
 
